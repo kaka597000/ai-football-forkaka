@@ -110,7 +110,7 @@ def _get_predictions_sync(db, date, category, page, page_size):
                     "home_logo": d.get("home_logo"),
                     "away_logo": d.get("away_logo"),
                     "league_name": d.get("league_name"),
-                    "match_date": d["match_date"].isoformat() if d.get("match_date") else None,
+                    "match_date": (d["match_date"].isoformat() if hasattr(d.get("match_date"), "isoformat") else str(d["match_date"])) if d.get("match_date") else None,
                     "status_short": d.get("status_short"),
                     "category": d.get("category"),
                 },

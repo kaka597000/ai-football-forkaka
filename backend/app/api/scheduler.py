@@ -114,6 +114,12 @@ async def get_logs(page: int = 1, page_size: int = 20, task_id: str | None = Non
     return await asyncio.to_thread(_get_logs_sync, page, page_size, task_id)
 
 
+def _safe_iso(val):
+    if val is None: return None
+    if hasattr(val, "isoformat"): return val.isoformat()
+    return str(val)
+
+
 def _get_logs_sync(page, page_size, task_id):
     from app.db.session import SessionLocal
     from sqlalchemy import text
@@ -129,8 +135,8 @@ def _get_logs_sync(page, page_size, task_id):
             d = dict(r._mapping)
             data.append({"id": d["id"], "task_id": d["task_id"], "task_name": d["task_name"],
                          "status": d["status"], "message": d["message"],
-                         "started_at": d["started_at"].isoformat() if d["started_at"] else None,
-                         "finished_at": d["finished_at"].isoformat() if d["finished_at"] else None})
+                         "started_at": _safe_iso(d["started_at"]),
+                         "finished_at": _safe_iso(d["finished_at"])})
         return {"data": data, "total": total, "page": page, "page_size": page_size}
     finally:
         db.close()

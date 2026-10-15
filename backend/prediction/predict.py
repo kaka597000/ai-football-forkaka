@@ -125,6 +125,55 @@ def _has_required_llm_fields(data: dict) -> bool:
     return all(str(data.get(k) or "").strip() for k in required)
 
 
+def _fallback_llm(fixture: dict, xgb: dict) -> dict:
+    """无 LLM 时用 XGBoost 结果合成 LLM 输出"""
+    # 胜平负
+    wh, wd, wa = xgb['win_home'], xgb['win_draw'], xgb['win_away']
+    probs = [wa, wd, wh]
+    win_label = ["客胜", "平局", "主胜"][probs.index(max(probs))]
+    win_pct = f"{round(max(probs) * 100)}%"
+
+    # 比分（取 Poisson Top3）
+    scores = xgb.get('top3', [])
+    score_str = ",".join(s['score'] for s in scores) if scores else "1-0,1-1,2-1"
+
+    # 让球
+    if wh > wa + 0.1:
+        handicap_num = -1
+        handicap_team = "主队"
+        handicap_pct = f"{round(wh * 100)}%"
+    elif wa > wh + 0.1:
+        handicap_num = 1
+        handicap_team = "客队"
+        handicap_pct = f"{round(wa * 100)}%"
+    else:
+        handicap_num = 0
+        handicap_team = "平手"
+        handicap_pct = f"{round(max(wh, wa) * 100)}%"
+
+    # 大小球
+    over = xgb.get('over25_prob', 0.5)
+    ou_type = "大" if over >= 0.5 else "小"
+    ou_pct = f"{round(over * 100)}%"
+
+    return {
+        "win": win_label,
+        "win_pct": win_pct,
+        "score": score_str,
+        "handicap": f"{handicap_num} {handicap_team}",
+        "over_under": f"{ou_type} 2.5",
+        "handicap_num": handicap_num,
+        "handicap_team": handicap_team,
+        "handicap_pct": handicap_pct,
+        "ou_line": "2.5",
+        "ou_type": ou_type,
+        "ou_pct": ou_pct,
+        "brief_analysis": f"[{fixture.get('league_name','')}] {fixture['home_name']} vs {fixture['away_name']}",
+        "core_data": f"XGBoost模型概率: 主{round(wh*100)}% 平{round(wd*100)}% 客{round(wa*100)}%",
+        "deep_report": "(本地 demo 模式 —— 配置 DEEPSEEK_API_KEY 后启用 LLM 深度分析)",
+    }
+
+
 def _fetch_odds(fixture_id: int) -> dict | None:
     """拉取近7天至少5个庄家的赔率变化"""
     try:
@@ -457,9 +506,10 @@ def predict_fixture(fixture_id: int, db=None) -> dict | None:
             llm_result = _call_llm(prompt)
         except Exception as e:
             logger.debug(f"LLM失败: {e}")
-        if llm_result is None:
-            logger.warning(f"预测失败 fixture={fixture_id}: LLM 未返回完整预测，跳过入库")
-            return None
+        if llm_result is None or not _has_required_llm_fields(llm_result):
+            # Fallback: 没有 LLM key 时，用 XGBoost 结果合成一个 demo LLM 输出
+            logger.info(f"LLM 不可用，使用 XGBoost fallback 预测 fixture={fixture_id}")
+            llm_result = _fallback_llm(fixture, xgb_result)
 
         # 6. 写库
         _save_prediction(db, fixture, xgb_result, llm_result, odds, model_group)
@@ -479,40 +529,7 @@ def predict_fixture(fixture_id: int, db=None) -> dict | None:
 
 def _save_prediction(db, fixture, xgb, llm, odds, model_group):
     llm = llm or {}
-    db.execute(text("""
-        INSERT INTO predictions (
-            fixture_id, home_name, away_name, home_logo, away_logo,
-            league_name, match_date, model_group,
-            win_home, win_draw, win_away, over25_prob,
-            top3_scores, lambda_home, lambda_away, handicap,
-            llm_win, llm_score, llm_win_pct,
-            llm_brief, llm_core_data, llm_deep_report,
-            llm_handicap, llm_over_under,
-            llm_handicap_num, llm_handicap_team, llm_handicap_pct,
-            llm_ou_line, llm_ou_type, llm_ou_pct,
-            created_at, updated_at
-        ) VALUES (
-            :fid, :hname, :aname, :hlogo, :alogo,
-            :lname, :mdate, :mgroup,
-            :wh, :wd, :wa, :o25,
-            :top3, :lh, :la, :hc,
-            :lw, :ls, :lwp,
-            :lb, :lcd, :ldr,
-            :lhc, :lou,
-            :hcn, :hct, :hcp,
-            :oun, :out, :oup,
-            :now, :now
-        )
-        ON DUPLICATE KEY UPDATE
-            win_home=:wh, win_draw=:wd, win_away=:wa, over25_prob=:o25,
-            top3_scores=:top3, lambda_home=:lh, lambda_away=:la, handicap=:hc,
-            llm_win=:lw, llm_score=:ls, llm_win_pct=:lwp,
-            llm_brief=:lb, llm_core_data=:lcd, llm_deep_report=:ldr,
-            llm_handicap=:lhc, llm_over_under=:lou,
-            llm_handicap_num=:hcn, llm_handicap_team=:hct, llm_handicap_pct=:hcp,
-            llm_ou_line=:oun, llm_ou_type=:out, llm_ou_pct=:oup,
-            model_group=:mgroup, updated_at=:now
-    """), {
+    params = {
         'fid': fixture['id'],
         'hname': fixture['home_name'], 'aname': fixture['away_name'],
         'hlogo': fixture.get('home_logo'), 'alogo': fixture.get('away_logo'),
@@ -530,5 +547,52 @@ def _save_prediction(db, fixture, xgb, llm, odds, model_group):
         'hcn': llm.get('handicap_num'), 'hct': llm.get('handicap_team'), 'hcp': llm.get('handicap_pct'),
         'oun': llm.get('ou_line'), 'out': llm.get('ou_type'), 'oup': llm.get('ou_pct'),
         'now': datetime.now(),
-    })
+    }
+
+    # 兼容 SQLite 和 MySQL：先查存在性，再决定 INSERT 还是 UPDATE
+    exists = db.execute(
+        text("SELECT 1 FROM predictions WHERE fixture_id = :fid"), {"fid": params["fid"]}
+    ).fetchone()
+
+    if exists:
+        db.execute(text("""
+            UPDATE predictions SET
+                home_name=:hname, away_name=:aname, home_logo=:hlogo, away_logo=:alogo,
+                league_name=:lname, match_date=:mdate, model_group=:mgroup,
+                win_home=:wh, win_draw=:wd, win_away=:wa, over25_prob=:o25,
+                top3_scores=:top3, lambda_home=:lh, lambda_away=:la, handicap=:hc,
+                llm_win=:lw, llm_score=:ls, llm_win_pct=:lwp,
+                llm_brief=:lb, llm_core_data=:lcd, llm_deep_report=:ldr,
+                llm_handicap=:lhc, llm_over_under=:lou,
+                llm_handicap_num=:hcn, llm_handicap_team=:hct, llm_handicap_pct=:hcp,
+                llm_ou_line=:oun, llm_ou_type=:out, llm_ou_pct=:oup,
+                updated_at=:now
+            WHERE fixture_id=:fid
+        """), params)
+    else:
+        db.execute(text("""
+            INSERT INTO predictions (
+                fixture_id, home_name, away_name, home_logo, away_logo,
+                league_name, match_date, model_group,
+                win_home, win_draw, win_away, over25_prob,
+                top3_scores, lambda_home, lambda_away, handicap,
+                llm_win, llm_score, llm_win_pct,
+                llm_brief, llm_core_data, llm_deep_report,
+                llm_handicap, llm_over_under,
+                llm_handicap_num, llm_handicap_team, llm_handicap_pct,
+                llm_ou_line, llm_ou_type, llm_ou_pct,
+                created_at, updated_at
+            ) VALUES (
+                :fid, :hname, :aname, :hlogo, :alogo,
+                :lname, :mdate, :mgroup,
+                :wh, :wd, :wa, :o25,
+                :top3, :lh, :la, :hc,
+                :lw, :ls, :lwp,
+                :lb, :lcd, :ldr,
+                :lhc, :lou,
+                :hcn, :hct, :hcp,
+                :oun, :out, :oup,
+                :now, :now
+            )
+        """), params)
     db.commit()

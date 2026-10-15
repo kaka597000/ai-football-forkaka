@@ -1,8 +1,10 @@
+import os
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     # 数据库
+    db_backend: str = os.environ.get("DB_BACKEND", "sqlite")  # mysql / sqlite
     db_host: str = "localhost"
     db_port: int = 3306
     db_user: str = "root"
@@ -23,6 +25,8 @@ class Settings(BaseSettings):
 
     @property
     def db_url(self) -> str:
+        if self.db_backend == "sqlite":
+            return f"sqlite:///{self.db_name}.db"
         return (
             f"mysql+pymysql://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"

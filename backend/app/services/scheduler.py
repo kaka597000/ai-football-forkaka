@@ -13,6 +13,16 @@ from app.services.fixture_service import sync_fixtures, sync_live_fixtures
 from app.services.prediction_result_service import backfill_results
 from app.services.auto_predict_service import auto_predict
 
+
+def _safe_iso(val):
+    """兼容 SQLite 返回字符串 vs MySQL 返回 datetime"""
+    if val is None:
+        return None
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
+    return str(val)
+
+
 LIVE_INTERVAL_SECONDS = 2 * 60
 
 # ──── 默认任务定义 ────
@@ -39,14 +49,19 @@ def _seed_defaults():
         for k, v in _DEFAULT_TASKS.items():
             sh = v.get("start_hour")
             iv = v.get("interval_seconds")
-            db.execute(
-                text(
-                    """INSERT IGNORE INTO scheduler_tasks
-                       (id, name, interval_seconds, start_hour, is_enabled)
-                       VALUES (:id, :name, :iv, :sh, 1)"""
-                ),
-                {"id": k, "name": v["name"], "iv": iv, "sh": sh},
-            )
+            # 先查再插（兼容 SQLite 和 MySQL）
+            exists = db.execute(
+                text("SELECT 1 FROM scheduler_tasks WHERE id = :id"), {"id": k}
+            ).fetchone()
+            if not exists:
+                db.execute(
+                    text(
+                        """INSERT INTO scheduler_tasks
+                           (id, name, interval_seconds, start_hour, is_enabled)
+                           VALUES (:id, :name, :iv, :sh, 1)"""
+                    ),
+                    {"id": k, "name": v["name"], "iv": iv, "sh": sh},
+                )
         db.commit()
     finally:
         db.close()
@@ -115,8 +130,8 @@ def get_scheduler_status() -> dict:
                 "interval_seconds": iv,
                 "interval_desc": desc,
                 "is_enabled": bool(r["is_enabled"]),
-                "last_run": r["last_run"].isoformat() if r["last_run"] else None,
-                "next_run": r["next_run"].isoformat() if r["next_run"] else None,
+                "last_run": _safe_iso(r["last_run"]),
+                "next_run": _safe_iso(r["next_run"]),
                 "is_running": bool(r["is_running"]),
             })
         return {"tasks": tasks}
